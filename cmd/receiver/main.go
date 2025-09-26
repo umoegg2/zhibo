@@ -12,18 +12,34 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 )
 
+const (
+	commandStart    = "start"
+	commandStop     = "stop"
+	commandSetTrack = "setTrack"
+)
+
 var httpClient = &http.Client{Timeout: 10 * time.Second}
+
+type commandRequest struct {
+	Command string `json:"command"`
+	Track   string `json:"track,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
+}
 
 func main() {
 	serverURL := flag.String("server", "http://localhost:8080", "control server base URL")
 	senderID := flag.String("sender", "default-sender", "target sender identifier")
-	action := flag.String("action", "start", "control action: start or stop")
+	action := flag.String("action", "start", "control action: start, stop, or set")
+	track := flag.String("track", "", "media track to control (video, audio, screen) for set action")
+	enable := flag.String("enable", "", "desired state (true/false) for the selected track when using set action")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -37,22 +53,39 @@ func main() {
 	}()
 
 	switch *action {
-	case "start":
+	case commandStart:
 		if err := startReceiving(ctx, *serverURL, *senderID); err != nil {
 			log.Fatalf("receiver error: %v", err)
 		}
-	case "stop":
-		if err := sendCommand(*serverURL, *senderID, "stop"); err != nil {
+	case commandStop:
+		if err := sendCommand(*serverURL, *senderID, commandRequest{Command: commandStop}); err != nil {
 			log.Fatalf("failed to send stop command: %v", err)
 		}
 		log.Println("stop command sent")
+	case "set":
+		if *track == "" {
+			log.Fatal("--track is required for set action")
+		}
+		if *enable == "" {
+			log.Fatal("--enable is required for set action")
+		}
+		state, err := strconv.ParseBool(*enable)
+		if err != nil {
+			log.Fatalf("invalid --enable value: %v", err)
+		}
+		normalizedTrack := strings.ToLower(strings.TrimSpace(*track))
+		payload := commandRequest{Command: commandSetTrack, Track: normalizedTrack, Enabled: &state}
+		if err := sendCommand(*serverURL, *senderID, payload); err != nil {
+			log.Fatalf("failed to send track command: %v", err)
+		}
+		log.Printf("track %s set to %t", normalizedTrack, state)
 	default:
 		log.Fatalf("unknown action %q", *action)
 	}
 }
 
 func startReceiving(ctx context.Context, baseURL, senderID string) error {
-	if err := sendCommand(baseURL, senderID, "start"); err != nil {
+	if err := sendCommand(baseURL, senderID, commandRequest{Command: commandStart}); err != nil {
 		return err
 	}
 
@@ -115,8 +148,7 @@ func startReceiving(ctx context.Context, baseURL, senderID string) error {
 	return nil
 }
 
-func sendCommand(baseURL, id, command string) error {
-	payload := map[string]string{"command": command}
+func sendCommand(baseURL, id string, payload commandRequest) error {
 	buf, _ := json.Marshal(payload)
 	resp, err := http.Post(fmt.Sprintf("%s/receiver/%s/command", baseURL, id), "application/json", bytes.NewReader(buf))
 	if err != nil {

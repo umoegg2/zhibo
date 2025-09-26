@@ -13,6 +13,8 @@ import (
 
 type commandRequest struct {
 	Command string `json:"command"`
+	Track   string `json:"track,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
 }
 
 type signalRequest struct {
@@ -22,6 +24,8 @@ type signalRequest struct {
 
 type commandResponse struct {
 	Command string `json:"command"`
+	Track   string `json:"track,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
 }
 
 type signalResponse struct {
@@ -31,7 +35,7 @@ type signalResponse struct {
 
 type senderSession struct {
 	mu        sync.Mutex
-	commandCh chan string
+	commandCh chan commandRequest
 	offer     *signalRequest
 	answer    *signalRequest
 }
@@ -60,7 +64,7 @@ func (s *Server) getOrCreateSender(id string) *senderSession {
 	sess, ok := s.senders[id]
 	if !ok {
 		sess = &senderSession{
-			commandCh: make(chan string, 1),
+			commandCh: make(chan commandRequest, 1),
 		}
 		s.senders[id] = sess
 	}
@@ -120,7 +124,7 @@ func (s *Server) handleSenderCommand(w http.ResponseWriter, r *http.Request, id 
 	ctx := r.Context()
 	select {
 	case cmd := <-sess.commandCh:
-		writeJSON(w, commandResponse{Command: cmd})
+		writeJSON(w, commandResponse{Command: cmd.Command, Track: cmd.Track, Enabled: cmd.Enabled})
 	case <-time.After(60 * time.Second):
 		writeJSON(w, commandResponse{Command: "noop"})
 	case <-ctx.Done():
@@ -164,9 +168,12 @@ func (s *Server) handleReceiverCommand(w http.ResponseWriter, r *http.Request, i
 		http.Error(w, "command is required", http.StatusBadRequest)
 		return
 	}
+	if payload.Track != "" {
+		payload.Track = strings.ToLower(strings.TrimSpace(payload.Track))
+	}
 	sess := s.getOrCreateSender(id)
 	select {
-	case sess.commandCh <- payload.Command:
+	case sess.commandCh <- payload:
 	default:
 		// drop command if queue full
 	}
