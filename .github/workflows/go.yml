@@ -1,0 +1,78 @@
+# .github/workflows/build-windows.yml
+
+# Workflow 的名称
+name: Build Windows Executable
+
+# 触发 Workflow 的事件
+on:
+  # 1. 当有代码 push 到 main 分支时
+  push:
+    branches: [ "main" ]
+  # 2. 允许你在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+
+jobs:
+  # 定义一个名为 build-windows 的 job
+  build-windows:
+    # 指定 job 运行在最新的 Ubuntu 虚拟机上
+    runs-on: ubuntu-latest
+
+    steps:
+      # 第一步：检出你的代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 第二步：设置 Go 环境
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21' # 你可以根据项目需要更改 Go 版本
+
+      # 第三步：安装 Windows 交叉编译工具链 (MinGW) 和必要的构建工具
+      # 这是解决 CGO 依赖的关键步骤
+      - name: Install MinGW toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 pkg-config-mingw-w64-x86-64 make git
+
+      # 第四步：为 Windows 目标编译和安装 libvpx 库
+      # 我们不能用 apt install libvpx-dev，因为它安装的是 Linux 版本。
+      # 我们必须从源码为 Windows 目标手动编译。
+      - name: Build and install libvpx for Windows
+        run: |
+          # 定义 MinGW 工具链的安装路径，这是标准路径
+          export MINGW_PREFIX="/usr/x86_64-w64-mingw32"
+          
+          # 克隆 libvpx 源码
+          git clone --depth 1 https://chromium.googlesource.com/webm/libvpx
+          cd libvpx
+          
+          # 配置构建，目标设为 win64，并指定安装到 MinGW 的目录
+          ./configure --target=x86_64-win64-gcc --prefix="$MINGW_PREFIX" --disable-examples --disable-unit-tests
+          
+          # 编译和安装
+          make
+          sudo make install
+
+      # 第五步：交叉编译 Go 项目
+      - name: Build Go application for Windows
+        # 设置环境变量，告诉 Go 进行交叉编译
+        env:
+          GOOS: windows        # 目标操作系统
+          GOARCH: amd64        # 目标架构
+          CGO_ENABLED: "1"     # 必须启用 CGO
+          CC: "x86_64-w64-mingw32-gcc" # 指定 C 交叉编译器
+        run: |
+          # 假设你的主程序入口在项目根目录，输出文件名为 app.exe
+          # -v: 打印编译的包名
+          # -o: 指定输出文件名
+          go build -v -o app.exe .
+
+      # 第六步：上传编译好的 exe 文件作为构建产物 (Artifact)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          # 构建产物的名称
+          name: windows-binary
+          # 要上传的文件路径
+          path: app.exe
