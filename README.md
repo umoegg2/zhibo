@@ -1,2 +1,95 @@
 # zhibo
-是使用https://github.com/pion/mediadevices 及其系列库写出客户端（发送），服务端（转发控制），客户端（接收），客户端被设定为自动启动，接受到服务端发送信号时开始传输数据，使用HTTP/S协议进行通信，接收客户端可以控制发送客户端是否要发送数据，检测到数据之后应先是之，客户端发送的数据应包括视频流，音频流，屏幕捕获流，可控制使用哪个设备进行发送
+
+该项目提供了一个基于 [pion/mediadevices](https://github.com/pion/mediadevices) 与 [pion/webrtc](https://github.com/pion/webrtc) 的演示，包含：
+
+* 控制服务端（`cmd/server`）：通过 HTTP 提供发送端控制及 SDP 信令转发。
+* 自动启动的发送端客户端（`cmd/sender`）：默认注册到服务端，在收到 "start" 指令后采集音频、视频与屏幕共享流并推送。
+* 接收端客户端（`cmd/receiver`）：可以向服务端发送开始、停止以及单独启停音频/视频/屏幕轨道的指令，并处理来自发送端的 WebRTC 流。
+
+## 目录结构
+
+```
+cmd/
+  receiver/    接收端命令行程序
+  sender/      发送端命令行程序
+  server/      控制服务端
+internal/
+  server/      服务端 HTTP 逻辑实现
+```
+
+## 构建
+
+```bash
+go build ./...
+```
+
+每个组件都是独立的二进制程序，构建后可以分别运行。默认会拉取 mediadevices 与 webrtc 依赖并启用测试驱动，便于在没有真实硬件的环境下调试；当发送端运行在 Windows 平台时，会自动加载系统摄像头、麦克风与屏幕捕获驱动以采集真实数据。
+
+## 运行示例
+
+1. **启动控制服务端**：
+
+   ```bash
+   go run ./cmd/server -addr :8080
+   ```
+
+2. **启动发送端**：
+
+   ```bash
+   go run ./cmd/sender -server http://localhost:8080 -id demo-sender
+   ```
+
+   发送端启动后会自动注册并轮询服务端指令。通过 `-video`、`-audio`、`-screen` 参数可以指定具体的设备 ID。
+
+3. **启动接收端并发起传输**：
+
+   ```bash
+   go run ./cmd/receiver -server http://localhost:8080 -sender demo-sender -action start
+   ```
+
+   接收端会向服务端发送 `start` 指令并建立 WebRTC 会话。当需要停止推流时，可执行：
+
+   ```bash
+   go run ./cmd/receiver -server http://localhost:8080 -sender demo-sender -action stop
+   ```
+
+   若希望在不中断会话的情况下单独关闭或开启某个媒体通道，可以使用 `set` 动作，例如关闭屏幕共享：
+
+   ```bash
+   go run ./cmd/receiver -server http://localhost:8080 -sender demo-sender -action set -track screen -enable false
+   ```
+
+   再次开启摄像头：
+
+   ```bash
+   go run ./cmd/receiver -server http://localhost:8080 -sender demo-sender -action set -track video -enable true
+   ```
+
+## HTTP 接口说明
+
+服务端公开了如下控制与信令接口（均以 JSON 交互）：
+
+* `POST /sender/register`：发送端注册。
+* `GET /sender/{id}/command`：发送端长轮询获取控制指令。
+* `POST /receiver/{id}/command`：接收端发送控制指令。基础请求为 `{ "command": "start" }`；若要单独控制轨道，可发送 `{ "command": "setTrack", "track": "video|audio|screen", "enabled": true|false }`。
+* `POST /signal/{id}/offer`、`GET /signal/{id}/offer`：发送端上传 SDP Offer，接收端轮询获取。
+* `POST /signal/{id}/answer`、`GET /signal/{id}/answer`：接收端上传 SDP Answer，发送端轮询获取。
+
+## 发送端媒体采集
+
+发送端在收到 `start` 指令后会：
+
+1. 初始化 VP8（视频）与 Opus（音频）编码器，并将其注册到 pion/webrtc 的 MediaEngine。
+2. 通过 mediadevices 获取音频、视频与屏幕捕获轨道：Windows 平台会调用真实硬件驱动，其他平台默认加载虚拟驱动方便调试。
+3. 将轨道附加到 WebRTC PeerConnection，生成 SDP Offer 并通过服务端信令交换。
+4. 会话过程中响应 `setTrack` 指令动态启停对应轨道，收到 `stop` 指令后结束本次推流并等待下一次 `start`。
+
+## 接收端行为
+
+接收端通过 `-action start` 主动向服务端发送开始指令，并在收到 SDP Offer 后生成 Answer。连接建立后，程序会持续读取远端轨道（仅做丢弃处理，可在此基础上接入播放器或存储逻辑）。使用 `-action stop` 可中止发送端推流，而 `-action set` 搭配 `-track` 与 `-enable` 可在保持连接的情况下动态控制各个通道。
+
+## 注意事项
+
+* 非 Windows 平台默认启用了虚拟音视频与屏幕驱动，Windows 会自动加载真实硬件驱动；实际部署时可根据平台选择合适的驱动组合。
+* 若需要 HTTPS 或鉴权，可在 `internal/server` 中扩展控制逻辑。
+* 这是一个演示架构，实际生产环境应结合信令可靠性、错误处理与媒体呈现进行完善。
